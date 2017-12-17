@@ -9,6 +9,8 @@ import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.TextView;
 
+import com.llx278.record.encode.MediaMuxerWrapper;
+
 /**
  *
  * Created by llx on 02/12/2017.
@@ -18,6 +20,7 @@ public class CameraPreviewFragment extends Fragment implements View.OnClickListe
 
     private static final String TAG = "main";
     private CameraPreviewGLSurfaceView cameraPreviewGLSurfaceView;
+    private MediaMuxerWrapper mediaMuxerWrapper;
 
     @Nullable
     @Override
@@ -37,15 +40,17 @@ public class CameraPreviewFragment extends Fragment implements View.OnClickListe
         start.setOnClickListener(this);
         stop.setOnClickListener(this);
 
+        mediaMuxerWrapper = new MediaMuxerWrapper();
+        cameraPreviewGLSurfaceView.setMediaMuxerWrapper(mediaMuxerWrapper);
 
     }
 
     private void startRecord() {
-        cameraPreviewGLSurfaceView.startRecord();
+        mediaMuxerWrapper.startRecord();
     }
 
     private void stopRecord() {
-        cameraPreviewGLSurfaceView.stopRecord();
+        mediaMuxerWrapper.stopRecord();
     }
 
     @Override

@@ -14,16 +14,11 @@ import android.hardware.camera2.CameraDevice;
 import android.hardware.camera2.CameraManager;
 import android.hardware.camera2.CaptureRequest;
 import android.hardware.camera2.params.StreamConfigurationMap;
-import android.media.MediaCodec;
-import android.media.MediaCodecInfo;
-import android.media.MediaFormat;
-import android.media.MediaMuxer;
 import android.media.MediaRecorder;
 import android.opengl.EGL14;
 import android.opengl.GLES20;
 import android.opengl.GLSurfaceView;
 import android.opengl.Matrix;
-import android.os.Environment;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.Looper;
@@ -38,32 +33,26 @@ import android.util.Size;
 import android.view.Surface;
 import android.widget.TextView;
 
+import com.llx278.record.encode.MediaMuxerWrapper;
 import com.llx278.record.glutils.GLDrawer2D;
 import com.llx278.record.glutils.RenderHandler;
 
-import java.io.File;
-import java.io.IOException;
-import java.nio.ByteBuffer;
-import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
-import java.util.Date;
 import java.util.List;
-import java.util.Locale;
 
 import javax.microedition.khronos.egl.EGLConfig;
 import javax.microedition.khronos.opengles.GL10;
 
 /**
  *
- *
  * Render of GLSurfaceView
  * Created by llx on 02/12/2017.
  */
 
-public class CameraPreviewGLSurfaceView extends GLSurfaceView {
+public class CameraPreviewGLSurfaceView extends GLSurfaceView implements MediaMuxerWrapper.VideoCodecInitListener {
 
     private static final String TAG = "main";
 
@@ -71,8 +60,6 @@ public class CameraPreviewGLSurfaceView extends GLSurfaceView {
     private static final int SCALE_KEEP_ASPECT_VIEWPORT = 1;
     private static final int SCALE_KEEP_ASPECT = 2;
     private static final int SCALE_CROP_CENTER = 3;
-
-    private static final Object syncObj = new Object();
 
     private SurfaceRender surfaceRender;
 
@@ -82,7 +69,7 @@ public class CameraPreviewGLSurfaceView extends GLSurfaceView {
 
     private SurfaceTexture texture;
 
-    private Surface surface;
+    private Surface cameraPreviewSurface;
 
     private int videoWidth;
     private int videoHeight;
@@ -94,12 +81,9 @@ public class CameraPreviewGLSurfaceView extends GLSurfaceView {
 
     private HandlerThread backgroundThread;
 
-    private PrepareCallback callback;
-
     private RenderHandler renderHandler;
 
-    private boolean canDraw = false;
-
+    private MediaMuxerWrapper mediaMuxerWrapper;
 
     public CameraPreviewGLSurfaceView(Context context) {
         super(context);
@@ -108,10 +92,6 @@ public class CameraPreviewGLSurfaceView extends GLSurfaceView {
     public CameraPreviewGLSurfaceView(Context context, AttributeSet attrs) {
         super(context, attrs);
         init();
-    }
-
-    public void setPreviewCallback(PrepareCallback callback) {
-        this.callback = callback;
     }
 
     public void setUpdateView(TextView tv) {
@@ -126,14 +106,9 @@ public class CameraPreviewGLSurfaceView extends GLSurfaceView {
         setRenderer(surfaceRender);
     }
 
-    public void startRecord() {
-        Log.d(TAG, "startRecord!");
-        bgHandler.sendEmptyMessage(BGHandler.START_RECORD);
-    }
-
-    public void stopRecord() {
-        Log.d(TAG,"stopRecord");
-        bgHandler.sendEmptyMessage(BGHandler.STOP_RECORD);
+    public void setMediaMuxerWrapper (MediaMuxerWrapper mediaMuxerWrapper) {
+        this.mediaMuxerWrapper = mediaMuxerWrapper;
+        this.mediaMuxerWrapper.setOnVideoCodecInitListener(this);
     }
 
     @Override
@@ -188,6 +163,25 @@ public class CameraPreviewGLSurfaceView extends GLSurfaceView {
         bgHandler.sendEmptyMessage(BGHandler.STOP_PREVIEW);
     }
 
+    @Override
+    public void onInputSurfaceCreated(final Surface inputSurface) {
+        if (inputSurface == null) {
+            throw new IllegalArgumentException("you can not pass a null input cameraPreviewSurface!!");
+        }
+        Log.d(TAG,"onInputSurfaceCreated");
+        queueEvent(new Runnable() {
+            @Override
+            public void run() {
+                Log.d(TAG, "render handler setEglContext");
+                renderHandler.setEglContext(EGL14.eglGetCurrentContext(),
+                        surfaceRender.textureId,
+                        inputSurface,
+                        true);
+            }
+        });
+    }
+
+
     class SurfaceRender implements Renderer, SurfaceTexture.OnFrameAvailableListener {
         private GLDrawer2D drawer;
         private final float[] stMatrix = new float[16];
@@ -196,16 +190,10 @@ public class CameraPreviewGLSurfaceView extends GLSurfaceView {
         private int textureId;
         private long elapsedTime = -1;
         private boolean flip = false;
-        private int codecReady;
 
         SurfaceRender() {
             Matrix.setIdentityM(mvpMatrix, 0);
         }
-
-        public void notifyCodecReady(int codecReady) {
-            this.codecReady = codecReady;
-        }
-
         @Override
         public void onSurfaceCreated(GL10 gl, EGLConfig config) {
             Log.d(TAG, "onSurfaceCreated");
@@ -299,34 +287,15 @@ public class CameraPreviewGLSurfaceView extends GLSurfaceView {
                 texture.getTransformMatrix(stMatrix);
             }
             drawer.draw(textureId, stMatrix);
-            flip = !flip;
-            if (flip) {
-                synchronized (this) {
-                    if (codecReady == 1) {
-                        //Log.d(TAG,"renderHandler draw !!");
-                        renderHandler.draw(textureId, stMatrix, mvpMatrix);
-                    }
-                    bgHandler.sendEmptyMessage(BGHandler.FRAME_AVAILABLE_SOON);
-                }
-            }
-            if (elapsedTime == -1) {
-                elapsedTime = SystemClock.elapsedRealtime();
-            } else {
-                long current = SystemClock.elapsedRealtime();
-                final float frameRate = (float) (current - elapsedTime) * 1000;
-                elapsedTime = current;
-                fpsView.post(new Runnable() {
-                    @Override
-                    public void run() {
-                        fpsView.setText(String.valueOf(Float.valueOf(frameRate)));
-                    }
-                });
-            }
         }
 
         @Override
         public void onFrameAvailable(SurfaceTexture surfaceTexture) {
             requestUpdateTex = true;
+            if (mediaMuxerWrapper.isCodecRunning()) {
+                renderHandler.draw(textureId, stMatrix, mvpMatrix);
+                mediaMuxerWrapper.frameAvailableSoon();
+            }
         }
     }
 
@@ -335,14 +304,7 @@ public class CameraPreviewGLSurfaceView extends GLSurfaceView {
         static final int START_PREVIEW = 1;
         static final int STOP_PREVIEW = 2;
         static final int UPDATE_VIEW_PORT = 3;
-        static final int INIT_VIDEO_CODEC = 4;
-        static final int SURFACE_CREATED = 5;
-        static final int START_RECORD = 6;
-        static final int STOP_RECORD = 7;
-        static final int FRAME_AVAILABLE_SOON = 8;
-        static final int CODEC_READY = 9;
         CameraDeviceHelper cameraDeviceHelper;
-        VideoCodecThread videoCodecThread;
 
         BGHandler(Looper looper) {
             super(looper);
@@ -363,43 +325,9 @@ public class CameraPreviewGLSurfaceView extends GLSurfaceView {
                     int width = msg.arg1;
                     int height = msg.arg2;
                     handleUpdateViewPort(width, height);
-                    break;
-                case INIT_VIDEO_CODEC:
-                    startVideoThread();
-                    break;
-                case SURFACE_CREATED:
-                    Surface surface = (Surface) msg.obj;
-                    surfaceCreated(surface);
-                    break;
-                case START_RECORD:
-                    videoCodecThread.innerStartRecord();
-                    break;
-                case STOP_RECORD:
-                    videoCodecThread.innerStopRecord();
-                    break;
-                case FRAME_AVAILABLE_SOON:
-                    if (videoCodecThread != null) {
-                        videoCodecThread.frameAvailableSoon();
-                    }
-                    break;
-                case CODEC_READY:
-                    int ready = msg.arg1;
-                    surfaceRender.notifyCodecReady(ready);
+                    mediaMuxerWrapper.initCodec(videoWidth,videoHeight);
                     break;
             }
-        }
-
-        private void surfaceCreated(final Surface surface) {
-            queueEvent(new Runnable() {
-                @Override
-                public void run() {
-                    Log.d(TAG, "render handler setEglContext");
-                    renderHandler.setEglContext(EGL14.eglGetCurrentContext(),
-                            surfaceRender.textureId,
-                            surface,
-                            true);
-                }
-            });
         }
 
         private void handleStop() {
@@ -417,11 +345,6 @@ public class CameraPreviewGLSurfaceView extends GLSurfaceView {
 
         private void handlePreview(int width, int height) {
             cameraDeviceHelper.startPreview(width, height);
-        }
-
-        private void startVideoThread() {
-            videoCodecThread = new VideoCodecThread();
-            videoCodecThread.start();
         }
     }
 
@@ -467,7 +390,6 @@ public class CameraPreviewGLSurfaceView extends GLSurfaceView {
                     videoWidth = previewSize.getWidth();
                     videoHeight = previewSize.getHeight();
                     texture.setDefaultBufferSize(videoWidth, videoHeight);
-                    bgHandler.sendEmptyMessage(BGHandler.INIT_VIDEO_CODEC);
                     Message msg = Message.obtain();
                     msg.what = BGHandler.UPDATE_VIEW_PORT;
                     msg.arg1 = CameraPreviewGLSurfaceView.this.getWidth();
@@ -589,11 +511,11 @@ public class CameraPreviewGLSurfaceView extends GLSurfaceView {
                 Log.d(TAG, "surfaceTexture initialization failed!");
                 return;
             }
-            surface = new Surface(texture);
+            cameraPreviewSurface = new Surface(texture);
             previewStateCallback = new PreviewStateCallback(characteristics);
             try {
 
-                cameraDevice.createCaptureSession(Collections.singletonList(surface),
+                cameraDevice.createCaptureSession(Collections.singletonList(cameraPreviewSurface),
                         previewStateCallback, CameraPreviewGLSurfaceView.this.bgHandler);
             } catch (CameraAccessException e) {
                 e.printStackTrace();
@@ -628,14 +550,9 @@ public class CameraPreviewGLSurfaceView extends GLSurfaceView {
             try {
                 CaptureRequest.Builder builder =
                         cameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
-                builder.addTarget(surface);
+                builder.addTarget(cameraPreviewSurface);
                 builder.set(CaptureRequest.CONTROL_AF_MODE,
                         CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE);
-                Range<Integer>[] ranges = cameraCharacteristics.
-                        get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES);
-                if (ranges != null && ranges.length >= 1) {
-                    builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, ranges[0]);
-                }
                 session.setRepeatingRequest(builder.build(), null, bgHandler);
                 Log.d(TAG, "start preview success !!! ");
             } catch (CameraAccessException e) {
@@ -655,219 +572,6 @@ public class CameraPreviewGLSurfaceView extends GLSurfaceView {
         }
     }
 
-    class VideoCodecThread extends Thread {
-        static final String MIME_TYPE = "video/avc";
-        static final String DIR_NAME = "MY";
-        static final int FRAME_RATE = 25;
-        final Object requestDrainSync = new Object();
-        private MediaCodec mediaCodec;
-        private MediaMuxer mediaMuxer;
-        private int trackId;
-        private boolean hasStarted;
-        private MediaCodec.BufferInfo bufferInfo;
-        private int requestDrain = 0;
-        private boolean stop;
-        private boolean muxerIsStarted;
-
-        void frameAvailableSoon() {
-
-            if (stop) {
-                return;
-            }
-            synchronized (requestDrainSync) {
-                requestDrain++;
-                requestDrainSync.notify();
-            }
-        }
-
-
-        void innerStartRecord() {
-            Log.d(TAG,"innerStartRecord!");
-            hasStarted = true;
-            synchronized (syncObj) {
-                syncObj.notify();
-            }
-        }
-
-        void innerStopRecord() {
-            Log.d(TAG,"innerStopRecord!");
-            hasStarted = false;
-        }
-
-        private void init() {
-            Log.d(TAG, "videoCodec init");
-            String outPutPath = createCaptureFile();
-            try {
-                if (outPutPath == null) {
-                    throw new RuntimeException("create capture file failed!");
-                }
-                mediaMuxer = new MediaMuxer(outPutPath,MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
-            } catch (IOException e) {
-                throw new RuntimeException(e);
-            }
-
-            bufferInfo = new MediaCodec.BufferInfo();
-
-            MediaFormat format = MediaFormat.createVideoFormat(MIME_TYPE,
-                    videoWidth, videoHeight);
-            format.setInteger(MediaFormat.KEY_COLOR_FORMAT,
-                    MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface);
-            int bitrate = (int) (0.25f * videoWidth * videoHeight * FRAME_RATE);
-            Log.d(TAG, String.format("bitRate = %5.2f[Mbps]", bitrate / 1024f / 1024f));
-            format.setInteger(MediaFormat.KEY_BIT_RATE, bitrate);
-            format.setInteger(MediaFormat.KEY_FRAME_RATE, FRAME_RATE);
-            format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 10);
-            Log.d(TAG, "format : " + format);
-            try {
-                mediaCodec = MediaCodec.createEncoderByType(MIME_TYPE);
-                mediaCodec.configure(format,
-                        null,
-                        null,
-                        MediaCodec.CONFIGURE_FLAG_ENCODE);
-                final Surface surface = mediaCodec.createInputSurface();
-                Log.d(TAG, "mediaCodec surface created!init renderhandler");
-                Message msg = Message.obtain();
-                msg.obj = surface;
-                msg.what = BGHandler.SURFACE_CREATED;
-                bgHandler.sendMessage(msg);
-                mediaCodec.start();
-            } catch (IOException e) {
-                e.printStackTrace();
-                throw new RuntimeException("create mediacodec failed!");
-            }
-        }
-
-        private String createCaptureFile() {
-            File dir = new File(
-                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES),
-                    DIR_NAME);
-            if (!dir.exists()) {
-                if (!dir.mkdir()) {
-                    Log.e(TAG,"create capture file failed!!");
-                    return null;
-                }
-            }
-
-            if (!dir.canWrite()) {
-                Log.e(TAG,String.format("path = %s cannot write!",dir.getAbsolutePath()));
-                return null;
-            }
-            SimpleDateFormat dateFormat =
-                    new SimpleDateFormat("yyyy-MM-dd-HH-mm-ss", Locale.CHINA);
-            Date date = new Date(System.currentTimeMillis());
-            String fileName  = "record_" + dateFormat.format(date) + ".mp4";
-            return new File(dir,fileName).getAbsolutePath();
-        }
-
-        @Override
-        public void run() {
-
-            init();
-
-            if (!hasStarted) {
-                synchronized (syncObj) {
-                    while (!hasStarted) {
-                        try {
-                            syncObj.wait();
-                        } catch (InterruptedException e) {
-                            e.printStackTrace();
-                            Log.e(TAG, "interrupted syncObj.wait()! return");
-                            return;
-                        }
-                    }
-                }
-            }
-
-            Log.d(TAG, "mediaCodec prepare start");
-            Message msg = Message.obtain();
-            msg.what = BGHandler.CODEC_READY;
-            msg.arg1 = 1;
-            bgHandler.sendMessage(msg);
-            while (true) {
-                boolean localRequestDrain;
-                synchronized (requestDrainSync) {
-                    localRequestDrain = requestDrain>0;
-                    if (localRequestDrain) {
-                        requestDrain--;
-                    }
-                }
-
-                if (!hasStarted) {
-                    // we have stop capture video,so we drain media codec output buffer
-                    // and signal end of input stream
-                    Log.d(TAG,"prepare quit codec !!!");
-                    drain();
-                    mediaCodec.signalEndOfInputStream();
-                    drain();
-                    Log.d(TAG,"we finish record !!");
-                    Message msg1 = Message.obtain();
-                    msg1.what = BGHandler.CODEC_READY;
-                    msg1.arg1 = 0;
-                    bgHandler.sendMessage(msg1);
-
-                    mediaCodec.stop();
-                    mediaCodec.release();
-
-                    mediaMuxer.stop();
-                    mediaMuxer.release();
-                    muxerIsStarted = false;
-                    stop = true;
-                    break;
-                }
-
-                if (localRequestDrain) {
-                    // we drain output buffer
-                    drain();
-                } else {
-                    synchronized (requestDrainSync) {
-                        try {
-                            requestDrainSync.wait();
-                        } catch (InterruptedException e) {
-                            e.printStackTrace();
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        private void drain() {
-            boolean isCapturing = true;
-            while (isCapturing) {
-                int index = mediaCodec.dequeueOutputBuffer(bufferInfo,1000 * 5);
-                if (index >= 0) {
-                    // we get an available index
-                    ByteBuffer buffer = mediaCodec.getOutputBuffer(index);
-                    if (buffer == null) {
-                        Log.e(TAG,"we get an unavailable buffer");
-                        throw new RuntimeException("we get an unavailable buffer");
-                    }
-                    if (bufferInfo.size != 0) {
-                        if (muxerIsStarted) {
-                            mediaMuxer.writeSampleData(trackId,buffer,bufferInfo);
-                        }
-                        mediaCodec.releaseOutputBuffer(index,false);
-                    }
-
-                    if ((bufferInfo.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
-                        Log.d(TAG,"we found end fo stream tag!");
-                        isCapturing = false;
-                    }
-
-                } else if (index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-
-                    Log.e(TAG,"INFO_OUTPUT_FORMAT_CHANGED !!");
-                    MediaFormat videoFormat = mediaCodec.getOutputFormat();
-                    trackId = mediaMuxer.addTrack(videoFormat);
-                    mediaMuxer.start();
-                    muxerIsStarted = true;
-                } else if (index == MediaCodec.INFO_TRY_AGAIN_LATER) {
-                    isCapturing = false;
-                }
-            }
-        }
-    }
-
     class CompareSizesByArea implements Comparator<Size> {
         @Override
         public int compare(Size lhs, Size rhs) {
@@ -875,10 +579,5 @@ public class CameraPreviewGLSurfaceView extends GLSurfaceView {
             return Long.signum((long) lhs.getWidth() * lhs.getHeight() -
                     (long) rhs.getWidth() * rhs.getHeight());
         }
-
-    }
-
-    public interface PrepareCallback {
-        void onSurfaceViewPrepare(int previewWidth, int previewHeight);
     }
 }
